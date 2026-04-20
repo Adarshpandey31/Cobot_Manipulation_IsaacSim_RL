@@ -75,20 +75,50 @@ def main():
 
     desired_quat = get_ur10e_downward_quat(num_envs, device)
 
+    # ------------------------------------------------------------------
+    # Inspect action layout so this script doesn't hardcode wrong shape.
+    # This was the source of your 8 vs 7 crash.
+    # ------------------------------------------------------------------
+    am = env.unwrapped.action_manager
+    print(am)
+    print("active_terms =", am.active_terms)
+    print("term_dims    =", am.action_term_dim)
+    print("total_dim    =", am.total_action_dim)
+
+    term_dims = am.action_term_dim
+
+    # Supported layouts for this scripted EE-pose agent:
+    #   [7]    -> absolute IK arm only  (x,y,z,qw,qx,qy,qz)
+    #   [7, 1] -> absolute IK arm + gripper
+    if term_dims == [7]:
+        arm_has_pose_action = True
+        gripper_available = False
+        print("[WARN] This env exposes only 7 actions: EE pose only, no gripper action.")
+        print("[WARN] Arm motion can be debugged, but grasp/pick will intentionally stop at GRASP.")
+    elif term_dims == [7, 1]:
+        arm_has_pose_action = True
+        gripper_available = True
+        print("[INFO] Detected pose IK arm action + gripper action.")
+    else:
+        raise RuntimeError(
+            "zero_agent.py expects an absolute pose IK action layout of [7] or [7, 1]. "
+            f"Got term_dims={term_dims}. This script is not compatible with the current task/action config."
+        )
+
+    def build_action(target_pos: torch.Tensor, target_quat: torch.Tensor, gripper_value: float) -> torch.Tensor:
+        if gripper_available:
+            gripper = torch.full((num_envs, 1), gripper_value, device=device)
+            return torch.cat([target_pos, target_quat, gripper], dim=-1)
+        else:
+            return torch.cat([target_pos, target_quat], dim=-1)
+
     # Read current state immediately after reset
     ee_frame_sensor = env.unwrapped.scene["ee_frame"]
     init_ee_pos = ee_frame_sensor.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
     init_ee_quat = ee_frame_sensor.data.target_quat_w[..., 0, :].clone()
 
-    # SAFE first action: hold current pose/orientation with gripper open
-    actions = torch.cat(
-        [
-            init_ee_pos,
-            init_ee_quat,
-            torch.full((num_envs, 1), GRIPPER_OPEN, device=device),
-        ],
-        dim=-1,
-    )
+    # SAFE first action: hold current pose/orientation
+    actions = build_action(init_ee_pos, init_ee_quat, GRIPPER_OPEN)
 
     rest_time = 0.40
     grasp_hold_time = 1.00
@@ -129,13 +159,15 @@ def main():
                 phase_time = 0.0
 
             target_pos = ee_pos.clone()
-            target_quat = ee_quat.clone()   # important: keep current quat by default
-            gripper = torch.full((num_envs, 1), GRIPPER_OPEN, device=device)
+            target_quat = ee_quat.clone()
+
+            # Only meaningful when gripper exists.
+            gripper_value = GRIPPER_OPEN
 
             if phase == Phase.REST:
                 target_pos = ee_pos.clone()
                 target_quat = ee_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if phase_time >= rest_time:
                     phase = Phase.APPROACH_ABOVE_PICK
@@ -144,7 +176,7 @@ def main():
                 target_pos = object_pos.clone()
                 target_pos[:, 2] = object_pos[:, 2] + pick_hover_offset_z
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if reached_xyz(ee_pos, target_pos, threshold=0.02):
                     phase = Phase.APPROACH_PICK
@@ -152,7 +184,7 @@ def main():
             elif phase == Phase.APPROACH_PICK:
                 target_pos = object_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if reached_xyz(ee_pos, target_pos, threshold=0.012):
                     grasp_object_pos = object_pos.clone()
@@ -170,16 +202,22 @@ def main():
             elif phase == Phase.GRASP:
                 target_pos = grasp_object_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_CLOSE
+                gripper_value = GRIPPER_CLOSE
 
-                if phase_time >= grasp_hold_time:
+                if not gripper_available:
+                    fail_reason = (
+                        "This environment exposes only a 7D EE pose action and no gripper action. "
+                        "Arm motion is working, but grasp cannot be executed until gripper_action is active in the env."
+                    )
+                    phase = Phase.FAIL
+                elif phase_time >= grasp_hold_time:
                     phase = Phase.LIFT
 
             elif phase == Phase.LIFT:
                 target_pos = grasp_object_pos.clone()
                 target_pos[:, 2] = grasp_object_pos[:, 2] + lift_height_above_grasp
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_CLOSE
+                gripper_value = GRIPPER_CLOSE
 
                 object_lift_delta = (object_pos[:, 2] - grasp_object_pos[:, 2]).mean().item()
 
@@ -196,7 +234,7 @@ def main():
             elif phase == Phase.MOVE_ABOVE_PLACE:
                 target_pos = place_hover_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_CLOSE
+                gripper_value = GRIPPER_CLOSE
 
                 if reached_xyz(ee_pos, target_pos, threshold=0.02):
                     phase = Phase.LOWER_TO_PLACE
@@ -204,7 +242,7 @@ def main():
             elif phase == Phase.LOWER_TO_PLACE:
                 target_pos = place_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_CLOSE
+                gripper_value = GRIPPER_CLOSE
 
                 if reached_xyz(ee_pos, target_pos, threshold=0.012):
                     phase = Phase.RELEASE
@@ -212,7 +250,7 @@ def main():
             elif phase == Phase.RELEASE:
                 target_pos = place_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if phase_time >= release_hold_time:
                     phase = Phase.RETRACT
@@ -220,7 +258,7 @@ def main():
             elif phase == Phase.RETRACT:
                 target_pos = place_hover_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if reached_xyz(ee_pos, target_pos, threshold=0.02):
                     phase = Phase.DONE
@@ -228,7 +266,7 @@ def main():
             elif phase == Phase.DONE:
                 target_pos = place_hover_pos.clone()
                 target_quat = desired_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
 
                 if phase_time >= done_hold_time:
                     if lifted_successfully:
@@ -240,11 +278,11 @@ def main():
             elif phase == Phase.FAIL:
                 target_pos = ee_pos.clone()
                 target_quat = ee_quat.clone()
-                gripper[:] = GRIPPER_OPEN
+                gripper_value = GRIPPER_OPEN
                 print("[CHECK] Stopping because grasp/lift failed.")
                 break
 
-            actions = torch.cat([target_pos, target_quat, gripper], dim=-1)
+            actions = build_action(target_pos, target_quat, gripper_value)
             phase_time += dt
 
     env.close()

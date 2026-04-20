@@ -6,12 +6,37 @@ import torch
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import FrameTransformer
 from isaaclab.utils.math import subtract_frame_transforms
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+from isaaclab.utils.math import combine_frame_transforms
 
+def object_to_goal_position(
+    env,
+    command_name: str = "object_pose",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    robot: RigidObject = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    des_pos_b = command[:, :3]
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_pos_w, robot.data.root_quat_w, des_pos_b)
+    return des_pos_w - obj.data.root_pos_w[:, :3]
+
+def gripper_opening(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot = env.scene[asset_cfg.name]
+    joint_names = robot.data.joint_names
+    idx = joint_names.index("finger_joint")
+    return robot.data.joint_pos[:, idx:idx+1]
+    
 def object_position_in_robot_root_frame(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -22,3 +47,29 @@ def object_position_in_robot_root_frame(
     object_pos_w = object.data.root_pos_w[:, :3]
     object_pos_b, _ = subtract_frame_transforms(robot.data.root_pos_w, robot.data.root_quat_w, object_pos_w)
     return object_pos_b
+
+
+def ee_position_in_robot_root_frame(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    robot: RigidObject = env.scene[robot_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+
+    ee_pos_w = ee_frame.data.target_pos_w[..., 0, :]
+    ee_pos_b, _ = subtract_frame_transforms(robot.data.root_pos_w, robot.data.root_quat_w, ee_pos_w)
+    return ee_pos_b
+
+
+def ee_to_object_position(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    object: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+
+    object_pos_w = object.data.root_pos_w[:, :3]
+    ee_pos_w = ee_frame.data.target_pos_w[..., 0, :]
+    return object_pos_w - ee_pos_w

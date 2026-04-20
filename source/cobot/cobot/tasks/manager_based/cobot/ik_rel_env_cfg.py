@@ -1,6 +1,3 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
-# SPDX-License-Identifier: BSD-3-Clause
-
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from isaaclab.utils import configclass
@@ -13,10 +10,8 @@ class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # keep the same task-specific UR10e home pose that already works for you
         self.scene.robot = joint_pos_env_cfg.UR10E_TASK_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # Relative IK is better for RL than absolute IK
         self.actions.arm_action = DifferentialInverseKinematicsActionCfg(
             asset_name="robot",
             joint_names=[
@@ -33,7 +28,7 @@ class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
                 use_relative_mode=True,
                 ik_method="dls",
             ),
-            scale=0.10,
+            scale=0.02,
             body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.18]),
         )
 

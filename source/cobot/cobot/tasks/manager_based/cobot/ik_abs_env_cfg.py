@@ -1,9 +1,7 @@
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from isaaclab.utils import configclass
-
-from . import joint_pos_env_cfg
-
+from . import joint_pos_env_cfg, mdp
 
 @configclass
 class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
@@ -29,4 +27,10 @@ class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
                 ik_method="dls",
             ),
             body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.18]),
+        )
+        self.actions.gripper_action = mdp.BinaryJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["finger_joint"],
+            open_command_expr={"finger_joint": 0.0},
+            close_command_expr={"finger_joint": 0.72},
         )

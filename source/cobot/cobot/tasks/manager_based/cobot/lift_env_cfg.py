@@ -78,6 +78,8 @@ class ObservationsCfg:
         object_position = ObsTerm(func=mdp.object_position_in_robot_root_frame)
         target_object_position = ObsTerm(func=mdp.generated_commands, params={"command_name": "object_pose"})
         actions = ObsTerm(func=mdp.last_action)
+        ee_position = ObsTerm(func=mdp.ee_position_in_robot_root_frame)
+        ee_to_object = ObsTerm(func=mdp.ee_to_object_position)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -90,6 +92,8 @@ class ObservationsCfg:
         object_position = ObsTerm(func=mdp.object_position_in_robot_root_frame)
         target_object_position = ObsTerm(func=mdp.generated_commands, params={"command_name": "object_pose"})
         actions = ObsTerm(func=mdp.last_action)
+        ee_position = ObsTerm(func=mdp.ee_position_in_robot_root_frame)
+        ee_to_object = ObsTerm(func=mdp.ee_to_object_position)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -116,23 +120,49 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.1}, weight=1.0)
-    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.04}, weight=15.0)
+    pregrasp_above_object = RewTerm(
+        func=mdp.ee_pregrasp_distance,
+        params={"std": 0.20, "hover_height": 0.10},
+        weight=4.0,
+    )
 
-    object_goal_tracking = RewTerm(
-        func=mdp.object_goal_distance,
-        params={"std": 0.3, "minimal_height": 0.04, "command_name": "object_pose"},
-        weight=16.0,
+    reaching_object = RewTerm(
+        func=mdp.object_ee_distance,
+        params={"std": 0.10},
+        weight=6.0,
+    )
+
+    xy_align_object = RewTerm(
+        func=mdp.object_xy_ee_distance,
+        params={"std": 0.06},
+        weight=5.0,
+    )
+
+    lifting_object = RewTerm(
+        func=mdp.object_is_lifted,
+        params={"minimal_height": 0.10},
+        weight=20.0,
+    )
+
+    carry_object_to_goal = RewTerm(
+        func=mdp.object_lifted_and_near_goal,
+        params={"std": 0.20, "minimal_height": 0.10, "command_name": "object_pose"},
+        weight=12.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.05, "minimal_height": 0.04, "command_name": "object_pose"},
-        weight=5.0,
+        params={"std": 0.05, "minimal_height": 0.10, "command_name": "object_pose"},
+        weight=8.0,
     )
 
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-1e-4, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    joint_vel = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-1e-4,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )  
 
 
 @configclass
@@ -144,6 +174,10 @@ class TerminationsCfg:
         params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")},
     )
 
+    success = DoneTerm(
+        func=mdp.object_reached_goal,
+        params={"command_name": "object_pose", "threshold": 0.05},
+    )
 
 @configclass
 class LiftEnvCfg(ManagerBasedRLEnvCfg):
@@ -157,7 +191,7 @@ class LiftEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 2
-        self.episode_length_s = 5.0
+        self.episode_length_s = 10.0
 
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
