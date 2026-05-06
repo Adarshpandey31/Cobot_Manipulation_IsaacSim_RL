@@ -3,6 +3,7 @@ from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsA
 from isaaclab.utils import configclass
 
 from . import joint_pos_env_cfg
+from .joint_pos_env_cfg import GRASP_CENTER_OFFSET
 
 
 @configclass
@@ -28,8 +29,10 @@ class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
                 use_relative_mode=True,
                 ik_method="dls",
             ),
-            scale=0.02,
-            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.18]),
+            scale=0.03,
+            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(
+                pos=GRASP_CENTER_OFFSET
+            ),
         )
 
 

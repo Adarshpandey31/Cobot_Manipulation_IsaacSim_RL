@@ -24,7 +24,7 @@ import cobot.tasks  # noqa: F401
 from isaaclab.controllers import DifferentialIKController
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.sim.utils import get_current_stage, resolve_prim_pose
-
+from isaaclab.utils.math import subtract_frame_transforms
 
 class Phase(Enum):
     HOME = auto()
@@ -231,6 +231,23 @@ def main():
         jacobian = robot.root_physx_view.get_jacobians()[:, ee_idx - base_idx, :, :][:, :, arm_joint_ids]
         body_pos_w = robot.data.body_pos_w
         outer_mid, inner_mid = compute_midpoints(body_pos_w)
+
+        outer_mid_in_wrist, _ = subtract_frame_transforms(
+            ee_pos,
+            ee_quat,
+            outer_mid,
+        )
+
+        inner_mid_in_wrist, _ = subtract_frame_transforms(
+            ee_pos,
+            ee_quat,
+            inner_mid,
+        )
+
+        if sim_step % 60 == 0:
+            print("[OFFSET DEBUG]")
+            print("outer_mid_in_wrist =", outer_mid_in_wrist[0].detach().cpu().numpy())
+            print("inner_mid_in_wrist =", inner_mid_in_wrist[0].detach().cpu().numpy())
         cube = get_cube_pose(device)
 
         if phase != prev_phase:

@@ -28,10 +28,7 @@ def object_to_goal_position(
     des_pos_w, _ = combine_frame_transforms(robot.data.root_pos_w, robot.data.root_quat_w, des_pos_b)
     return des_pos_w - obj.data.root_pos_w[:, :3]
 
-def gripper_opening(
-    env,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def gripper_opening(env, asset_cfg=SceneEntityCfg("robot")):
     robot = env.scene[asset_cfg.name]
     joint_names = robot.data.joint_names
     idx = joint_names.index("finger_joint")
@@ -73,3 +70,57 @@ def ee_to_object_position(
     object_pos_w = object.data.root_pos_w[:, :3]
     ee_pos_w = ee_frame.data.target_pos_w[..., 0, :]
     return object_pos_w - ee_pos_w
+
+def gripper_midpoint_position(
+    env,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot = env.scene[robot_cfg.name]
+
+    body_names = robot.data.body_names
+    left_idx = body_names.index("left_outer_finger")
+    right_idx = body_names.index("right_outer_finger")
+
+    left_pos = robot.data.body_pos_w[:, left_idx, :]
+    right_pos = robot.data.body_pos_w[:, right_idx, :]
+    gripper_mid_w = 0.5 * (left_pos + right_pos)
+
+    root_pos_w = robot.data.root_pos_w[:, :3]
+    root_quat_w = robot.data.root_quat_w
+
+    gripper_mid_b, _ = subtract_frame_transforms(
+        root_pos_w, root_quat_w, gripper_mid_w
+    )
+
+    return gripper_mid_b    
+
+def gripper_midpoint_to_object(
+    env,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot = env.scene[robot_cfg.name]
+    obj = env.scene[object_cfg.name]
+
+    body_names = robot.data.body_names
+    left_idx = body_names.index("left_outer_finger")
+    right_idx = body_names.index("right_outer_finger")
+
+    left_pos = robot.data.body_pos_w[:, left_idx, :]
+    right_pos = robot.data.body_pos_w[:, right_idx, :]
+    gripper_mid_w = 0.5 * (left_pos + right_pos)
+
+    object_pos_w = obj.data.root_pos_w[:, :3]
+
+    root_pos_w = robot.data.root_pos_w[:, :3]
+    root_quat_w = robot.data.root_quat_w
+
+    gripper_mid_b, _ = subtract_frame_transforms(
+        root_pos_w, root_quat_w, gripper_mid_w
+    )
+
+    object_pos_b, _ = subtract_frame_transforms(
+        root_pos_w, root_quat_w, object_pos_w
+    )
+
+    return object_pos_b - gripper_mid_b

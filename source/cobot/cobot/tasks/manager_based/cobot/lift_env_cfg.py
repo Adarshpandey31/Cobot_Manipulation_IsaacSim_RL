@@ -50,7 +50,7 @@ class CommandsCfg:
     object_pose = mdp.UniformPoseCommandCfg(
         asset_name="robot",
         body_name=MISSING,
-        resampling_time_range=(5.0, 5.0),
+        resampling_time_range=(100.0, 100.0),
         debug_vis=False,     #True for no RL
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.4, 0.6),
@@ -80,6 +80,9 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
         ee_position = ObsTerm(func=mdp.ee_position_in_robot_root_frame)
         ee_to_object = ObsTerm(func=mdp.ee_to_object_position)
+        gripper_opening = ObsTerm(func=mdp.gripper_opening)
+        gripper_midpoint_position = ObsTerm(func=mdp.gripper_midpoint_position)
+        gripper_midpoint_to_object = ObsTerm(func=mdp.gripper_midpoint_to_object)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -94,6 +97,9 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
         ee_position = ObsTerm(func=mdp.ee_position_in_robot_root_frame)
         ee_to_object = ObsTerm(func=mdp.ee_to_object_position)
+        gripper_opening = ObsTerm(func=mdp.gripper_opening)
+        gripper_midpoint_position = ObsTerm(func=mdp.gripper_midpoint_position)
+        gripper_midpoint_to_object = ObsTerm(func=mdp.gripper_midpoint_to_object)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -117,53 +123,169 @@ class EventCfg:
         },
     )
 
-
 @configclass
 class RewardsCfg:
+    # -------------------------------------------------------------------------
+    # 1. Reach above cube using virtual TCP / grasp center
+    # -------------------------------------------------------------------------
     pregrasp_above_object = RewTerm(
-        func=mdp.ee_pregrasp_distance,
-        params={"std": 0.20, "hover_height": 0.10},
+        func=mdp.grasp_center_pregrasp_distance,
+        params={
+            "std": 0.40,
+            "hover_height": 0.10,
+        },
+        weight=2.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 2. Coarse TCP-to-object reaching
+    # -------------------------------------------------------------------------
+    grasp_center_reaching_coarse = RewTerm(
+        func=mdp.grasp_center_object_distance_coarse,
+        params={
+            "std": 0.50,
+        },
+        weight=8.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 3. Fine TCP-to-object reaching
+    # -------------------------------------------------------------------------
+    grasp_center_reaching_fine = RewTerm(
+        func=mdp.grasp_center_object_distance_fine,
+        params={
+            "std": 0.08,
+        },
+        weight=2.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 4. XY alignment using virtual TCP / grasp center
+    # -------------------------------------------------------------------------
+    xy_align_object_coarse = RewTerm(
+        func=mdp.grasp_center_xy_object_distance,
+        params={
+            "std": 0.30,
+        },
         weight=4.0,
     )
 
-    reaching_object = RewTerm(
-        func=mdp.object_ee_distance,
-        params={"std": 0.10},
+    xy_align_object_fine = RewTerm(
+        func=mdp.grasp_center_xy_object_distance,
+        params={
+            "std": 0.06,
+        },
+        weight=1.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 5. Correct grasp pose: TCP centered in XY and correct in Z
+    # -------------------------------------------------------------------------
+    grasp_pose = RewTerm(
+        func=mdp.grasp_center_grasp_pose_reward,
+        params={
+            "xy_std": 0.08,
+            "z_std": 0.04,
+        },
         weight=6.0,
     )
 
-    xy_align_object = RewTerm(
-        func=mdp.object_xy_ee_distance,
-        params={"std": 0.06},
+    # -------------------------------------------------------------------------
+    # 6. Close gripper near cube
+    # -------------------------------------------------------------------------
+    soft_close_when_near = RewTerm(
+        func=mdp.soft_close_gripper_when_near_grasp_center,
+        params={
+            "std": 0.15,
+            "close_position": 0.72,
+        },
+        weight=3.0,
+    )
+
+    close_when_near = RewTerm(
+        func=mdp.close_gripper_when_near_grasp_center,
+        params={
+            "distance_threshold": 0.15,
+            "close_threshold": 0.10,
+        },
         weight=5.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 7. Lift shaping: closed gripper + aligned TCP + upward TCP
+    # -------------------------------------------------------------------------
+    lift_after_close = RewTerm(
+        func=mdp.lift_gripper_after_close_reward,
+        params={
+            "xy_std": 0.08,
+            "max_lift": 0.15,
+            "close_position": 0.72,
+        },
+        weight=8.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 8. Franka-style lift rewards
+    # -------------------------------------------------------------------------
+    small_lift_object = RewTerm(
+        func=mdp.object_is_lifted,
+        params={
+            "minimal_height": 0.065,
+        },
+        weight=10.0,
     )
 
     lifting_object = RewTerm(
         func=mdp.object_is_lifted,
-        params={"minimal_height": 0.10},
-        weight=20.0,
+        params={
+            "minimal_height": 0.10,
+        },
+        weight=30.0,
     )
 
-    carry_object_to_goal = RewTerm(
-        func=mdp.object_lifted_and_near_goal,
-        params={"std": 0.20, "minimal_height": 0.10, "command_name": "object_pose"},
-        weight=12.0,
+    # -------------------------------------------------------------------------
+    # 9. Franka-style object target tracking after lift
+    # This activates only after object is lifted above minimal_height.
+    # -------------------------------------------------------------------------
+    object_goal_tracking = RewTerm(
+        func=mdp.object_goal_distance,
+        params={
+            "std": 0.30,
+            "minimal_height": 0.065,
+            "command_name": "object_pose",
+        },
+        weight=16.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.05, "minimal_height": 0.10, "command_name": "object_pose"},
-        weight=8.0,
+        params={
+            "std": 0.05,
+            "minimal_height": 0.065,
+            "command_name": "object_pose",
+        },
+        weight=5.0,
     )
 
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
+    # -------------------------------------------------------------------------
+    # 10. Keep lifted object close to TCP
+    # -------------------------------------------------------------------------
+    hold_object_after_lift = RewTerm(
+        func=mdp.object_close_to_gripper_when_lifted,
+        params={
+            "std": 0.12,
+            "minimal_height": 0.08,
+        },
+        weight=10.0,
+    )
 
-    joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
+    # -------------------------------------------------------------------------
+    # 11. Smoothness penalty
+    # -------------------------------------------------------------------------
+    action_rate = RewTerm(
+        func=mdp.action_rate_l2,
         weight=-1e-4,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )  
-
+    )
 
 @configclass
 class TerminationsCfg:
@@ -173,12 +295,6 @@ class TerminationsCfg:
         func=mdp.root_height_below_minimum,
         params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")},
     )
-
-    success = DoneTerm(
-        func=mdp.object_reached_goal,
-        params={"command_name": "object_pose", "threshold": 0.05},
-    )
-
 @configclass
 class LiftEnvCfg(ManagerBasedRLEnvCfg):
     scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=32, env_spacing=2.5)
@@ -190,13 +306,34 @@ class LiftEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
 
     def __post_init__(self):
+        # ---------------------------------------------------------------------
+        # Simulation timing
+        # ---------------------------------------------------------------------
         self.decimation = 2
         self.episode_length_s = 10.0
 
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
 
+        # ---------------------------------------------------------------------
+        # Physics settings
+        # ---------------------------------------------------------------------
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
+
+        # ---------------------------------------------------------------------
+        # Franka-style object lift command, adapted for UR10e
+        # Target is close to cube and only moderately above table.
+        # This makes pickup/lift easier before we widen the task.
+        # ---------------------------------------------------------------------
+        self.commands.object_pose.resampling_time_range = (10.0, 10.0)
+
+        self.commands.object_pose.ranges.pos_x = (0.45, 0.55)
+        self.commands.object_pose.ranges.pos_y = (-0.10, 0.10)
+        self.commands.object_pose.ranges.pos_z = (0.18, 0.28)
+
+        self.commands.object_pose.ranges.roll = (0.0, 0.0)
+        self.commands.object_pose.ranges.pitch = (0.0, 0.0)
+        self.commands.object_pose.ranges.yaw = (0.0, 0.0)

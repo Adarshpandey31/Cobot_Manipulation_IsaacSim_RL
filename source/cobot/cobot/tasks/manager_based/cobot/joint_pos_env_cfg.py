@@ -13,16 +13,26 @@ from . import mdp
 from .lift_env_cfg import LiftEnvCfg
 
 
+# -------------------------------------------------------------------------
+# Virtual TCP / grasp center offset from wrist_3_link.
+# This must be used consistently in:
+#   1. ee_frame
+#   2. ik_rel body_offset
+#   3. ik_abs body_offset
+# -------------------------------------------------------------------------
+GRASP_CENTER_OFFSET = [0.0, 0.0, 0.18]
+
+
 # Task-specific UR10e + Robotiq 2F-85 home pose
 UR10E_TASK_CFG = UR10e_ROBOTIQ_2F_85_CFG.copy()
 UR10E_TASK_CFG.init_state.joint_pos = {
     "shoulder_pan_joint": 0.0,
-    "shoulder_lift_joint": 0.0,
-    "elbow_joint": 0.0,
-    "wrist_1_joint": 0.0,
-    "wrist_2_joint": 0.0,
+    "shoulder_lift_joint": -1.20,
+    "elbow_joint": 1.40,
+    "wrist_1_joint": -1.60,
+    "wrist_2_joint": -1.57,
     "wrist_3_joint": 0.0,
-    "finger_joint": 0.0,
+    "finger_joint": 0.03,
     ".*_inner_finger_joint": 0.0,
     ".*_inner_finger_knuckle_joint": 0.0,
     ".*_outer_.*_joint": 0.0,
@@ -61,7 +71,10 @@ class CobotCubeLiftEnvCfg(LiftEnvCfg):
 
         self.scene.object = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0, 0.055], rot=[1, 0, 0, 0]),
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=[0.5, 0.0, 0.055],
+                rot=[1.0, 0.0, 0.0, 0.0],
+            ),
             spawn=UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
                 scale=(0.8, 0.8, 0.8),
@@ -76,19 +89,18 @@ class CobotCubeLiftEnvCfg(LiftEnvCfg):
             ),
         )
 
+        # Optional marker config, not required for headless training.
         # marker_cfg = FRAME_MARKER_CFG.copy()
         # marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         # marker_cfg.prim_path = "/Visuals/FrameTransformer"
 
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base_link",
-            # debug_vis=False,
-            # visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/wrist_3_link",
                     name="end_effector",
-                    offset=OffsetCfg(pos=[0.0, 0.0, 0.18]),
+                    offset=OffsetCfg(pos=GRASP_CENTER_OFFSET),
                 ),
             ],
         )

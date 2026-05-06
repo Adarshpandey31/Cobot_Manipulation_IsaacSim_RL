@@ -17,7 +17,7 @@ class CobotLiftCubePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "cobot_pick_place"
 
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.2,
+        init_noise_std=0.5,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[256, 256, 128],
