@@ -28,9 +28,7 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0], rot=[0.707, 0, 0, 0.707]),
-        spawn=UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"
-        ),
+        spawn=UsdFileCfg(usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"),
     )
 
     plane = AssetBaseCfg(
@@ -51,7 +49,7 @@ class CommandsCfg:
         asset_name="robot",
         body_name=MISSING,
         resampling_time_range=(100.0, 100.0),
-        debug_vis=False,     #True for no RL
+        debug_vis=False,  # True for no RL
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.4, 0.6),
             pos_y=(-0.25, 0.25),
@@ -123,169 +121,163 @@ class EventCfg:
         },
     )
 
+
 @configclass
 class RewardsCfg:
     # -------------------------------------------------------------------------
-    # 1. Reach above cube using virtual TCP / grasp center
+    # 1. Move above cube, gripper open
     # -------------------------------------------------------------------------
-    pregrasp_above_object = RewTerm(
-        func=mdp.grasp_center_pregrasp_distance,
+    hover_above_object = RewTerm(
+        func=mdp.tcp_hover_above_object,
         params={
-            "std": 0.40,
-            "hover_height": 0.10,
+            "std_xy": 0.20,
+            "std_z": 0.10,
+            "hover_height": 0.18,
+        },
+        weight=2.0,
+    )
+
+    open_above_object = RewTerm(
+        func=mdp.open_gripper_above_object,
+        params={
+            "std_xy": 0.20,
+            "std_z": 0.10,
+            "hover_height": 0.18,
+            "close_position": 0.72,
         },
         weight=2.0,
     )
 
     # -------------------------------------------------------------------------
-    # 2. Coarse TCP-to-object reaching
-    # -------------------------------------------------------------------------
-    grasp_center_reaching_coarse = RewTerm(
-        func=mdp.grasp_center_object_distance_coarse,
-        params={
-            "std": 0.50,
-        },
-        weight=8.0,
-    )
-
-    # -------------------------------------------------------------------------
-    # 3. Fine TCP-to-object reaching
-    # -------------------------------------------------------------------------
-    grasp_center_reaching_fine = RewTerm(
-        func=mdp.grasp_center_object_distance_fine,
-        params={
-            "std": 0.08,
-        },
-        weight=2.0,
-    )
-
-    # -------------------------------------------------------------------------
-    # 4. XY alignment using virtual TCP / grasp center
+    # 2. XY alignment
     # -------------------------------------------------------------------------
     xy_align_object_coarse = RewTerm(
         func=mdp.grasp_center_xy_object_distance,
-        params={
-            "std": 0.30,
-        },
+        params={"std": 0.30},
         weight=4.0,
     )
 
     xy_align_object_fine = RewTerm(
         func=mdp.grasp_center_xy_object_distance,
-        params={
-            "std": 0.06,
-        },
-        weight=1.0,
+        params={"std": 0.06},
+        weight=4.0,
     )
 
     # -------------------------------------------------------------------------
-    # 5. Correct grasp pose: TCP centered in XY and correct in Z
+    # 3. Orientation shaping only, not hard gate
     # -------------------------------------------------------------------------
-    grasp_pose = RewTerm(
-        func=mdp.grasp_center_grasp_pose_reward,
+    tcp_orientation = RewTerm(
+        func=mdp.tcp_orientation_alignment,
         params={
-            "xy_std": 0.08,
-            "z_std": 0.04,
+            "target_quat": (0.0, 1.0, 0.0, 0.0),
+            "std": 1.20,
         },
-        weight=6.0,
+        weight=2.0,
     )
 
     # -------------------------------------------------------------------------
-    # 6. Close gripper near cube
+    # 4. Vertical descent
+    # IMPORTANT FIX:
+    # Your debug log shows correct visual grasp at tcp-cube z around 0.070 m.
+    # So target grasp height must be 0.070, not 0.035.
     # -------------------------------------------------------------------------
-    soft_close_when_near = RewTerm(
-        func=mdp.soft_close_gripper_when_near_grasp_center,
+    vertical_descent_progress = RewTerm(
+        func=mdp.tcp_vertical_descent_progress,
         params={
-            "std": 0.15,
-            "close_position": 0.72,
+            "std_xy": 0.07,
+            "hover_height": 0.18,
+            "grasp_height_offset": 0.070,
         },
-        weight=3.0,
+        weight=8.0,
     )
 
-    close_when_near = RewTerm(
-        func=mdp.close_gripper_when_near_grasp_center,
+    vertical_grasp_pose = RewTerm(
+        func=mdp.tcp_vertical_grasp_pose,
         params={
-            "distance_threshold": 0.15,
+            "std_xy": 0.05,
+            "std_z": 0.045,
+            "grasp_height_offset": 0.070,
+        },
+        weight=24.0,
+    )
+
+    # -------------------------------------------------------------------------
+    # 5. Prevent side / wrong close
+    # -------------------------------------------------------------------------
+    low_side_approach_penalty = RewTerm(
+        func=mdp.low_side_approach_penalty,
+        params={
+            "xy_threshold": 0.08,
+            "safe_height": 0.12,
+        },
+        weight=-6.0,
+    )
+
+    close_before_grasp_penalty = RewTerm(
+        func=mdp.close_before_vertical_grasp_penalty,
+        params={
+            "xy_threshold": 0.050,
+            "z_threshold": 0.045,
+            "grasp_height_offset": 0.070,
             "close_threshold": 0.10,
         },
-        weight=5.0,
+        weight=-12.0,
+    )
+
+    close_too_high_penalty = RewTerm(
+        func=mdp.close_too_high_penalty,
+        params={
+            "grasp_height_offset": 0.070,
+            "height_margin": 0.035,
+            "close_threshold": 0.10,
+        },
+        weight=-12.0,
     )
 
     # -------------------------------------------------------------------------
-    # 7. Lift shaping: closed gripper + aligned TCP + upward TCP
+    # 6. Teach close command first
     # -------------------------------------------------------------------------
-    lift_after_close = RewTerm(
-        func=mdp.lift_gripper_after_close_reward,
+    close_action_at_grasp_pose = RewTerm(
+        func=mdp.close_action_at_vertical_grasp_pose,
         params={
-            "xy_std": 0.08,
-            "max_lift": 0.15,
+            "xy_threshold": 0.050,
+            "z_threshold": 0.045,
+            "grasp_height_offset": 0.070,
+            "close_action_threshold": -0.05,
+        },
+        weight=18.0,
+    )
+
+    soft_close_at_vertical_grasp_pose = RewTerm(
+        func=mdp.soft_close_gripper_at_vertical_grasp_pose,
+        params={
+            "std_xy": 0.05,
+            "std_z": 0.045,
+            "grasp_height_offset": 0.070,
             "close_position": 0.72,
         },
         weight=8.0,
     )
 
-    # -------------------------------------------------------------------------
-    # 8. Franka-style lift rewards
-    # -------------------------------------------------------------------------
-    small_lift_object = RewTerm(
-        func=mdp.object_is_lifted,
+    close_at_vertical_grasp_pose = RewTerm(
+        func=mdp.close_gripper_at_vertical_grasp_pose,
         params={
-            "minimal_height": 0.065,
-        },
-        weight=10.0,
-    )
-
-    lifting_object = RewTerm(
-        func=mdp.object_is_lifted,
-        params={
-            "minimal_height": 0.10,
+            "xy_threshold": 0.050,
+            "z_threshold": 0.045,
+            "grasp_height_offset": 0.070,
+            "close_threshold": 0.10,
         },
         weight=30.0,
     )
 
     # -------------------------------------------------------------------------
-    # 9. Franka-style object target tracking after lift
-    # This activates only after object is lifted above minimal_height.
-    # -------------------------------------------------------------------------
-    object_goal_tracking = RewTerm(
-        func=mdp.object_goal_distance,
-        params={
-            "std": 0.30,
-            "minimal_height": 0.065,
-            "command_name": "object_pose",
-        },
-        weight=16.0,
-    )
-
-    object_goal_tracking_fine_grained = RewTerm(
-        func=mdp.object_goal_distance,
-        params={
-            "std": 0.05,
-            "minimal_height": 0.065,
-            "command_name": "object_pose",
-        },
-        weight=5.0,
-    )
-
-    # -------------------------------------------------------------------------
-    # 10. Keep lifted object close to TCP
-    # -------------------------------------------------------------------------
-    hold_object_after_lift = RewTerm(
-        func=mdp.object_close_to_gripper_when_lifted,
-        params={
-            "std": 0.12,
-            "minimal_height": 0.08,
-        },
-        weight=10.0,
-    )
-
-    # -------------------------------------------------------------------------
-    # 11. Smoothness penalty
+    # 7. Smoothness
     # -------------------------------------------------------------------------
     action_rate = RewTerm(
         func=mdp.action_rate_l2,
         weight=-1e-4,
     )
+
 
 @configclass
 class TerminationsCfg:
@@ -295,6 +287,8 @@ class TerminationsCfg:
         func=mdp.root_height_below_minimum,
         params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")},
     )
+
+
 @configclass
 class LiftEnvCfg(ManagerBasedRLEnvCfg):
     scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=32, env_spacing=2.5)

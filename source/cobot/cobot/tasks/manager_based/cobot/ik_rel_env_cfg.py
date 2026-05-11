@@ -29,10 +29,9 @@ class CobotCubeLiftEnvCfg(joint_pos_env_cfg.CobotCubeLiftEnvCfg):
                 use_relative_mode=True,
                 ik_method="dls",
             ),
-            scale=0.03,
-            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(
-                pos=GRASP_CENTER_OFFSET
-            ),
+            # XYZ motion normal, rotation motion small but not zero
+            scale=(0.04, 0.04, 0.04, 0.01, 0.01, 0.01),
+            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=GRASP_CENTER_OFFSET),
         )
 
 

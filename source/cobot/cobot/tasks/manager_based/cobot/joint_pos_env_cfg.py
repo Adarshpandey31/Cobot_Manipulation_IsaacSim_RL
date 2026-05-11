@@ -6,12 +6,10 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 from isaaclab_assets.robots.universal_robots import UR10e_ROBOTIQ_2F_85_CFG  # isort: skip
 
 from . import mdp
 from .lift_env_cfg import LiftEnvCfg
-
 
 # -------------------------------------------------------------------------
 # Virtual TCP / grasp center offset from wrist_3_link.
@@ -27,12 +25,12 @@ GRASP_CENTER_OFFSET = [0.0, 0.0, 0.18]
 UR10E_TASK_CFG = UR10e_ROBOTIQ_2F_85_CFG.copy()
 UR10E_TASK_CFG.init_state.joint_pos = {
     "shoulder_pan_joint": 0.0,
-    "shoulder_lift_joint": -1.20,
-    "elbow_joint": 1.40,
-    "wrist_1_joint": -1.60,
-    "wrist_2_joint": -1.57,
+    "shoulder_lift_joint": 0.0,
+    "elbow_joint": 0.0,
+    "wrist_1_joint": 0.0,
+    "wrist_2_joint": 0.0,
     "wrist_3_joint": 0.0,
-    "finger_joint": 0.03,
+    "finger_joint": 0.00,
     ".*_inner_finger_joint": 0.0,
     ".*_inner_finger_knuckle_joint": 0.0,
     ".*_outer_.*_joint": 0.0,

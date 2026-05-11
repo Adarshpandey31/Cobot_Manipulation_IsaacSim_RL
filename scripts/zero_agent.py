@@ -1,55 +1,75 @@
 import argparse
-from enum import Enum, auto
+from enum import IntEnum
 
 import torch
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Local UR10e pick-and-place test")
-parser.add_argument("--task", type=str, default="Template-Cobot-v0", help="Task name to launch.")
-parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O.")
-parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
+parser = argparse.ArgumentParser(description="UR10e robust scripted pick-and-place demo")
+parser.add_argument("--task", type=str, default="Template-Cobot-v0")
+parser.add_argument("--disable_fabric", action="store_true", default=False)
+parser.add_argument("--num_envs", type=int, default=1)
+parser.add_argument("--episode_length_s", type=float, default=80.0)
+parser.add_argument("--max_steps", type=int, default=0)
+parser.add_argument("--single_cycle", action="store_true", default=False)
+parser.add_argument("--print_every", type=int, default=100)
+
+# Important tuning values
+parser.add_argument("--grasp_z_offset", type=float, default=-0.006)
+parser.add_argument("--regrasp_step", type=float, default=0.004)
+parser.add_argument("--max_retries", type=int, default=5)
+
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+import cobot.tasks  # noqa: F401
 import gymnasium as gym
+
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
-import cobot.tasks  # noqa: F401
 
 
-class Phase(Enum):
-    REST = auto()
-    APPROACH_ABOVE_PICK = auto()
-    APPROACH_PICK = auto()
-    GRASP = auto()
-    LIFT = auto()
-    MOVE_ABOVE_PLACE = auto()
-    LOWER_TO_PLACE = auto()
-    RELEASE = auto()
-    RETRACT = auto()
-    DONE = auto()
-    FAIL = auto()
+class Phase(IntEnum):
+    REST = 0
+    APPROACH_ABOVE_PICK = 1
+    APPROACH_PICK = 2
+    SETTLE_AT_PICK = 3
+    GRASP = 4
+    LIFT = 5
+    MOVE_ABOVE_PLACE = 6
+    LOWER_TO_PLACE = 7
+    RELEASE = 8
+    RETRACT = 9
+    DONE = 10
 
 
-def print_phase(phase: Phase):
-    print("\n" + "=" * 90)
-    print(f"[PHASE] {phase.name}")
-    print("=" * 90)
+PHASE_NAMES = {
+    Phase.REST: "REST",
+    Phase.APPROACH_ABOVE_PICK: "APPROACH_ABOVE_PICK",
+    Phase.APPROACH_PICK: "APPROACH_PICK",
+    Phase.SETTLE_AT_PICK: "SETTLE_AT_PICK",
+    Phase.GRASP: "GRASP",
+    Phase.LIFT: "LIFT",
+    Phase.MOVE_ABOVE_PLACE: "MOVE_ABOVE_PLACE",
+    Phase.LOWER_TO_PLACE: "LOWER_TO_PLACE",
+    Phase.RELEASE: "RELEASE",
+    Phase.RETRACT: "RETRACT",
+    Phase.DONE: "DONE",
+}
 
 
-def reached_xyz(current_pos: torch.Tensor, target_pos: torch.Tensor, threshold: float = 0.015) -> bool:
-    err = torch.norm(current_pos - target_pos, dim=1)
-    return bool(torch.all(err < threshold).item())
+def reached_mask(current_pos: torch.Tensor, target_pos: torch.Tensor, threshold: float) -> torch.Tensor:
+    return torch.norm(current_pos - target_pos, dim=1) < threshold
 
 
 def get_ur10e_downward_quat(num_envs: int, device: torch.device) -> torch.Tensor:
-    desired_quat = torch.zeros((num_envs, 4), device=device)
-    desired_quat[:, 1] = 1.0
-    return desired_quat
+    # Isaac Lab quaternion action format: [w, x, y, z]
+    quat = torch.zeros((num_envs, 4), device=device)
+    quat[:, 1] = 1.0
+    return quat
 
 
 def main():
@@ -60,7 +80,7 @@ def main():
         use_fabric=not args_cli.disable_fabric,
     )
 
-    env_cfg.episode_length_s = 20.0
+    env_cfg.episode_length_s = args_cli.episode_length_s
     env_cfg.scene.num_envs = args_cli.num_envs
 
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -75,10 +95,6 @@ def main():
 
     desired_quat = get_ur10e_downward_quat(num_envs, device)
 
-    # ------------------------------------------------------------------
-    # Inspect action layout so this script doesn't hardcode wrong shape.
-    # This was the source of your 8 vs 7 crash.
-    # ------------------------------------------------------------------
     am = env.unwrapped.action_manager
     print(am)
     print("active_terms =", am.active_terms)
@@ -86,204 +102,316 @@ def main():
     print("total_dim    =", am.total_action_dim)
 
     term_dims = am.action_term_dim
-
-    # Supported layouts for this scripted EE-pose agent:
-    #   [7]    -> absolute IK arm only  (x,y,z,qw,qx,qy,qz)
-    #   [7, 1] -> absolute IK arm + gripper
     if term_dims == [7]:
-        arm_has_pose_action = True
         gripper_available = False
-        print("[WARN] This env exposes only 7 actions: EE pose only, no gripper action.")
-        print("[WARN] Arm motion can be debugged, but grasp/pick will intentionally stop at GRASP.")
+        print("[WARN] Only 7D arm action found. No gripper action available.")
     elif term_dims == [7, 1]:
-        arm_has_pose_action = True
         gripper_available = True
-        print("[INFO] Detected pose IK arm action + gripper action.")
+        print("[INFO] Detected absolute IK arm action + gripper action.")
     else:
         raise RuntimeError(
-            "zero_agent.py expects an absolute pose IK action layout of [7] or [7, 1]. "
-            f"Got term_dims={term_dims}. This script is not compatible with the current task/action config."
+            f"Expected action layout [7] or [7, 1], but got {term_dims}. "
+            "Use Template-Cobot-v0 with absolute IK pose control."
         )
 
-    def build_action(target_pos: torch.Tensor, target_quat: torch.Tensor, gripper_value: float) -> torch.Tensor:
+    def build_action(target_pos: torch.Tensor, target_quat: torch.Tensor, gripper_value: torch.Tensor) -> torch.Tensor:
         if gripper_available:
-            gripper = torch.full((num_envs, 1), gripper_value, device=device)
-            return torch.cat([target_pos, target_quat, gripper], dim=-1)
-        else:
-            return torch.cat([target_pos, target_quat], dim=-1)
+            if gripper_value.ndim == 1:
+                gripper_value = gripper_value.unsqueeze(-1)
+            return torch.cat([target_pos, target_quat, gripper_value], dim=-1)
+        return torch.cat([target_pos, target_quat], dim=-1)
 
-    # Read current state immediately after reset
-    ee_frame_sensor = env.unwrapped.scene["ee_frame"]
-    init_ee_pos = ee_frame_sensor.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
-    init_ee_quat = ee_frame_sensor.data.target_quat_w[..., 0, :].clone()
+    def gripper_vec(value: float) -> torch.Tensor:
+        return torch.full((num_envs,), value, device=device)
 
-    # SAFE first action: hold current pose/orientation
-    actions = build_action(init_ee_pos, init_ee_quat, GRIPPER_OPEN)
+    def advance(mask: torch.Tensor, next_phase: Phase):
+        if torch.any(mask):
+            phase[mask] = int(next_phase)
+            phase_time[mask] = 0.0
 
+    # Initial state
+    ee_frame = env.unwrapped.scene["ee_frame"]
+    init_ee_pos = ee_frame.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
+    init_ee_quat = ee_frame.data.target_quat_w[..., 0, :].clone()
+
+    actions = build_action(init_ee_pos, init_ee_quat, gripper_vec(GRIPPER_OPEN))
+
+    # Timing
     rest_time = 0.40
-    grasp_hold_time = 1.00
-    release_hold_time = 0.60
+    settle_pick_time = 0.25
+    grasp_hold_time = 1.60
+    release_hold_time = 0.70
     done_hold_time = 0.80
 
-    pick_hover_offset_z = 0.12
-    lift_height_above_grasp = 0.20
+    # Motion
+    pick_hover_offset_z = 0.13
+    lift_height = 0.22
     place_hover_z = 0.20
-    min_required_object_lift = 0.025
+    min_required_lift = 0.025
 
-    phase = Phase.REST
-    prev_phase = None
-    phase_time = 0.0
+    # Per-env states
+    phase = torch.full((num_envs,), int(Phase.REST), dtype=torch.long, device=device)
+    phase_time = torch.zeros(num_envs, device=device)
+    cycle_count = torch.zeros(num_envs, dtype=torch.long, device=device)
+    retry_count = torch.zeros(num_envs, dtype=torch.long, device=device)
 
-    grasp_object_pos = None
-    place_pos = None
-    place_hover_pos = None
-    lifted_successfully = False
-    fail_reason = ""
+    grasp_z_offset = torch.full((num_envs,), args_cli.grasp_z_offset, device=device)
+
+    grasp_target_pos = torch.zeros((num_envs, 3), device=device)
+    object_z_at_grasp = torch.zeros(num_envs, device=device)
+
+    place_pos = torch.zeros((num_envs, 3), device=device)
+    place_hover_pos = torch.zeros((num_envs, 3), device=device)
+
+    step = 0
+
+    print("\n[INFO] Robust multi-robot zero_agent started.")
+    print("[INFO] Fix added: per-env lift check + automatic regrasp retry.")
+    print(f"[INFO] Initial grasp_z_offset = {args_cli.grasp_z_offset}")
+    print(f"[INFO] max_retries = {args_cli.max_retries}, regrasp_step = {args_cli.regrasp_step}\n")
 
     while simulation_app.is_running():
         with torch.inference_mode():
             env.step(actions)
 
-            ee_frame_sensor = env.unwrapped.scene["ee_frame"]
-            ee_pos = ee_frame_sensor.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
-            ee_quat = ee_frame_sensor.data.target_quat_w[..., 0, :].clone()
+            ee_frame = env.unwrapped.scene["ee_frame"]
+            ee_pos = ee_frame.data.target_pos_w[..., 0, :].clone() - env.unwrapped.scene.env_origins
+            ee_quat = ee_frame.data.target_quat_w[..., 0, :].clone()
 
-            object_data = env.unwrapped.scene["object"].data
-            object_pos = object_data.root_pos_w.clone() - env.unwrapped.scene.env_origins
-
-            if phase != prev_phase:
-                print_phase(phase)
-                if phase == Phase.FAIL and fail_reason:
-                    print(f"[WARN] {fail_reason}")
-                prev_phase = phase
-                phase_time = 0.0
+            obj = env.unwrapped.scene["object"]
+            object_pos = obj.data.root_pos_w.clone() - env.unwrapped.scene.env_origins
 
             target_pos = ee_pos.clone()
             target_quat = ee_quat.clone()
+            grip = gripper_vec(GRIPPER_OPEN)
 
-            # Only meaningful when gripper exists.
-            gripper_value = GRIPPER_OPEN
+            # ----------------------------------------------------------
+            # REST
+            # ----------------------------------------------------------
+            m = phase == int(Phase.REST)
+            if torch.any(m):
+                target_pos[m] = ee_pos[m]
+                target_quat[m] = ee_quat[m]
+                grip[m] = GRIPPER_OPEN
+                advance(m & (phase_time >= rest_time), Phase.APPROACH_ABOVE_PICK)
 
-            if phase == Phase.REST:
-                target_pos = ee_pos.clone()
-                target_quat = ee_quat.clone()
-                gripper_value = GRIPPER_OPEN
+            # ----------------------------------------------------------
+            # MOVE ABOVE PICK
+            # ----------------------------------------------------------
+            m = phase == int(Phase.APPROACH_ABOVE_PICK)
+            if torch.any(m):
+                above_pick = object_pos.clone()
+                above_pick[:, 2] = object_pos[:, 2] + pick_hover_offset_z
 
-                if phase_time >= rest_time:
-                    phase = Phase.APPROACH_ABOVE_PICK
+                target_pos[m] = above_pick[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
 
-            elif phase == Phase.APPROACH_ABOVE_PICK:
-                target_pos = object_pos.clone()
-                target_pos[:, 2] = object_pos[:, 2] + pick_hover_offset_z
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_OPEN
+                reached = reached_mask(ee_pos, above_pick, 0.025)
+                timeout = phase_time > 4.0
+                advance(m & (reached | timeout), Phase.APPROACH_PICK)
 
-                if reached_xyz(ee_pos, target_pos, threshold=0.02):
-                    phase = Phase.APPROACH_PICK
+            # ----------------------------------------------------------
+            # DESCEND TO PICK
+            # ----------------------------------------------------------
+            m = phase == int(Phase.APPROACH_PICK)
+            if torch.any(m):
+                pick_pos = object_pos.clone()
+                pick_pos[:, 2] = object_pos[:, 2] + grasp_z_offset
 
-            elif phase == Phase.APPROACH_PICK:
-                target_pos = object_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_OPEN
+                target_pos[m] = pick_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
 
-                if reached_xyz(ee_pos, target_pos, threshold=0.012):
-                    grasp_object_pos = object_pos.clone()
+                reached = reached_mask(ee_pos, pick_pos, 0.014)
+                soft_timeout = (phase_time > 4.0) & reached_mask(ee_pos, pick_pos, 0.030)
 
-                    place_pos = torch.zeros((num_envs, 3), device=device)
-                    place_pos[:, 0] = 0.68
-                    place_pos[:, 1] = -0.22
-                    place_pos[:, 2] = grasp_object_pos[:, 2]
+                done = m & (reached | soft_timeout)
 
-                    place_hover_pos = place_pos.clone()
-                    place_hover_pos[:, 2] = grasp_object_pos[:, 2] + place_hover_z
+                if torch.any(done):
+                    grasp_target_pos[done] = pick_pos[done]
+                    object_z_at_grasp[done] = object_pos[done, 2]
 
-                    phase = Phase.GRASP
+                    c = cycle_count % 4
 
-            elif phase == Phase.GRASP:
-                target_pos = grasp_object_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_CLOSE
+                    p = torch.zeros((num_envs, 3), device=device)
+                    p[:, 0] = 0.68
+                    p[:, 1] = -0.22
+                    p[:, 2] = object_pos[:, 2]
 
-                if not gripper_available:
-                    fail_reason = (
-                        "This environment exposes only a 7D EE pose action and no gripper action. "
-                        "Arm motion is working, but grasp cannot be executed until gripper_action is active in the env."
+                    p[c == 1, 0] = 0.58
+                    p[c == 1, 1] = 0.22
+
+                    p[c == 2, 0] = 0.72
+                    p[c == 2, 1] = 0.12
+
+                    p[c == 3, 0] = 0.55
+                    p[c == 3, 1] = -0.18
+
+                    place_pos[done] = p[done]
+                    place_hover_pos[done] = p[done]
+                    place_hover_pos[done, 2] = p[done, 2] + place_hover_z
+
+                advance(done, Phase.SETTLE_AT_PICK)
+
+            # ----------------------------------------------------------
+            # SETTLE BEFORE CLOSING
+            # ----------------------------------------------------------
+            m = phase == int(Phase.SETTLE_AT_PICK)
+            if torch.any(m):
+                target_pos[m] = grasp_target_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
+
+                advance(m & (phase_time >= settle_pick_time), Phase.GRASP)
+
+            # ----------------------------------------------------------
+            # CLOSE GRIPPER
+            # ----------------------------------------------------------
+            m = phase == int(Phase.GRASP)
+            if torch.any(m):
+                target_pos[m] = grasp_target_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_CLOSE if gripper_available else GRIPPER_OPEN
+
+                advance(m & (phase_time >= grasp_hold_time), Phase.LIFT)
+
+            # ----------------------------------------------------------
+            # LIFT AND VERIFY PER ROBOT
+            # ----------------------------------------------------------
+            m = phase == int(Phase.LIFT)
+            if torch.any(m):
+                lift_pos = grasp_target_pos.clone()
+                lift_pos[:, 2] = grasp_target_pos[:, 2] + lift_height
+
+                target_pos[m] = lift_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_CLOSE if gripper_available else GRIPPER_OPEN
+
+                lift_delta = object_pos[:, 2] - object_z_at_grasp
+
+                lifted = lift_delta > min_required_lift
+                lift_reached = reached_mask(ee_pos, lift_pos, 0.040)
+
+                success = m & lifted & (phase_time > 0.8)
+                advance(success, Phase.MOVE_ABOVE_PLACE)
+
+                failed_lift = m & (~lifted) & (phase_time > 2.2)
+
+                retry = failed_lift & (retry_count < args_cli.max_retries)
+                if torch.any(retry):
+                    retry_count[retry] += 1
+                    grasp_z_offset[retry] -= args_cli.regrasp_step
+
+                    print(
+                        "[REGRASP] envs:",
+                        torch.nonzero(retry).flatten().detach().cpu().tolist(),
+                        "new_offsets:",
+                        grasp_z_offset[retry].detach().cpu().tolist(),
                     )
-                    phase = Phase.FAIL
-                elif phase_time >= grasp_hold_time:
-                    phase = Phase.LIFT
 
-            elif phase == Phase.LIFT:
-                target_pos = grasp_object_pos.clone()
-                target_pos[:, 2] = grasp_object_pos[:, 2] + lift_height_above_grasp
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_CLOSE
+                    # Open, go back above cube, and try again lower
+                    grip[retry] = GRIPPER_OPEN
+                    advance(retry, Phase.APPROACH_ABOVE_PICK)
 
-                object_lift_delta = (object_pos[:, 2] - grasp_object_pos[:, 2]).mean().item()
+                # After max retries, keep trying instead of stopping demo.
+                final_retry = failed_lift & (retry_count >= args_cli.max_retries)
+                if torch.any(final_retry):
+                    grasp_z_offset[final_retry] -= args_cli.regrasp_step * 0.5
+                    grip[final_retry] = GRIPPER_OPEN
+                    advance(final_retry, Phase.APPROACH_ABOVE_PICK)
 
-                if object_lift_delta >= min_required_object_lift and reached_xyz(ee_pos, target_pos, threshold=0.025):
-                    lifted_successfully = True
-                    phase = Phase.MOVE_ABOVE_PLACE
-                elif phase_time >= 2.5:
-                    fail_reason = (
-                        f"Object did not follow during lift. "
-                        f"object_lift_delta={object_lift_delta:.4f}, expected >= {min_required_object_lift:.4f}"
-                    )
-                    phase = Phase.FAIL
+            # ----------------------------------------------------------
+            # MOVE ABOVE PLACE
+            # ----------------------------------------------------------
+            m = phase == int(Phase.MOVE_ABOVE_PLACE)
+            if torch.any(m):
+                target_pos[m] = place_hover_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_CLOSE if gripper_available else GRIPPER_OPEN
 
-            elif phase == Phase.MOVE_ABOVE_PLACE:
-                target_pos = place_hover_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_CLOSE
+                reached = reached_mask(ee_pos, place_hover_pos, 0.035)
+                timeout = phase_time > 5.0
+                advance(m & (reached | timeout), Phase.LOWER_TO_PLACE)
 
-                if reached_xyz(ee_pos, target_pos, threshold=0.02):
-                    phase = Phase.LOWER_TO_PLACE
+            # ----------------------------------------------------------
+            # LOWER TO PLACE
+            # ----------------------------------------------------------
+            m = phase == int(Phase.LOWER_TO_PLACE)
+            if torch.any(m):
+                target_pos[m] = place_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_CLOSE if gripper_available else GRIPPER_OPEN
 
-            elif phase == Phase.LOWER_TO_PLACE:
-                target_pos = place_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_CLOSE
+                reached = reached_mask(ee_pos, place_pos, 0.022)
+                timeout = phase_time > 4.0
+                advance(m & (reached | timeout), Phase.RELEASE)
 
-                if reached_xyz(ee_pos, target_pos, threshold=0.012):
-                    phase = Phase.RELEASE
+            # ----------------------------------------------------------
+            # RELEASE
+            # ----------------------------------------------------------
+            m = phase == int(Phase.RELEASE)
+            if torch.any(m):
+                target_pos[m] = place_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
 
-            elif phase == Phase.RELEASE:
-                target_pos = place_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_OPEN
+                advance(m & (phase_time >= release_hold_time), Phase.RETRACT)
 
-                if phase_time >= release_hold_time:
-                    phase = Phase.RETRACT
+            # ----------------------------------------------------------
+            # RETRACT
+            # ----------------------------------------------------------
+            m = phase == int(Phase.RETRACT)
+            if torch.any(m):
+                target_pos[m] = place_hover_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
 
-            elif phase == Phase.RETRACT:
-                target_pos = place_hover_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_OPEN
+                reached = reached_mask(ee_pos, place_hover_pos, 0.035)
+                timeout = phase_time > 4.0
+                advance(m & (reached | timeout), Phase.DONE)
 
-                if reached_xyz(ee_pos, target_pos, threshold=0.02):
-                    phase = Phase.DONE
+            # ----------------------------------------------------------
+            # DONE
+            # ----------------------------------------------------------
+            m = phase == int(Phase.DONE)
+            if torch.any(m):
+                target_pos[m] = place_hover_pos[m]
+                target_quat[m] = desired_quat[m]
+                grip[m] = GRIPPER_OPEN
 
-            elif phase == Phase.DONE:
-                target_pos = place_hover_pos.clone()
-                target_quat = desired_quat.clone()
-                gripper_value = GRIPPER_OPEN
+                if args_cli.single_cycle:
+                    if torch.all(phase == int(Phase.DONE)):
+                        print("[CHECK] All robots completed one pick-place cycle.")
+                        break
+                else:
+                    repeat = m & (phase_time >= done_hold_time)
+                    if torch.any(repeat):
+                        cycle_count[repeat] += 1
+                        retry_count[repeat] = 0
+                        grasp_z_offset[repeat] = args_cli.grasp_z_offset
+                    advance(repeat, Phase.APPROACH_ABOVE_PICK)
 
-                if phase_time >= done_hold_time:
-                    if lifted_successfully:
-                        print("[CHECK] Pick-and-place finished successfully.")
-                    else:
-                        print("[WARN] Reached DONE pose, but object was never confirmed as lifted.")
-                    break
+            actions = build_action(target_pos, target_quat, grip)
 
-            elif phase == Phase.FAIL:
-                target_pos = ee_pos.clone()
-                target_quat = ee_quat.clone()
-                gripper_value = GRIPPER_OPEN
-                print("[CHECK] Stopping because grasp/lift failed.")
-                break
-
-            actions = build_action(target_pos, target_quat, gripper_value)
             phase_time += dt
+            step += 1
+
+            if args_cli.print_every > 0 and step % args_cli.print_every == 0:
+                counts = []
+                for ph in Phase:
+                    n = int(torch.sum(phase == int(ph)).item())
+                    if n > 0:
+                        counts.append(f"{PHASE_NAMES[ph]}={n}")
+
+                lifted_now = object_pos[:, 2] - object_z_at_grasp
+                lifted_count = int(torch.sum(lifted_now > min_required_lift).item())
+
+                print(f"[STEP {step:05d}] " + " | ".join(counts) + f" | lifted_now={lifted_count}/{num_envs}")
+
+            if args_cli.max_steps > 0 and step >= args_cli.max_steps:
+                print("[INFO] max_steps reached. Closing.")
+                break
 
     env.close()
 
